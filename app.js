@@ -32,7 +32,7 @@ const profileScreen = document.getElementById("profile-screen");
 // Auth UI
 const tabLogin = document.getElementById("tab-login");
 const tabRegister = document.getElementById("tab-register");
-const nameField = document.getElementById("name-field");
+const registerFields = document.getElementById("register-fields");
 const submitAuthBtn = document.getElementById("submit-auth-btn");
 const authErrorEl = document.getElementById("auth-error");
 
@@ -41,11 +41,12 @@ const monthFilterEl = document.getElementById("month-filter");
 
 let isRegisterMode = false;
 let currentUser = null;
+let userProfileData = {};
 let unsubscribeSnapshot = null;
 let allTransactions = [];
 let currentFilteredTransactions = [];
 let selectedAvatarColor = "10b981";
-let pendingCustomPhotoBase64 = null; // Menyimpan hasil kompresi foto profil baru
+let pendingCustomPhotoBase64 = null;
 let isPhotoResetRequested = false;
 
 lucide.createIcons();
@@ -69,7 +70,19 @@ const getMonthLabel = (ymStr) => {
   return date.toLocaleDateString("id-ID", { month: "long", year: "numeric" });
 };
 
-// Fungsi Kompresi & Crop Kotak 1:1 Foto Profil (Auto ~15KB agar muat di Firestore)
+// Helper Format Ribuan Otomatis pada Input Text
+function attachCurrencyFormatter(inputEl) {
+  inputEl.addEventListener("input", (e) => {
+    const rawValue = e.target.value.replace(/\D/g, "");
+    e.target.value = rawValue ? Number(rawValue).toLocaleString("id-ID") : "";
+  });
+}
+
+attachCurrencyFormatter(document.getElementById("reg-income"));
+attachCurrencyFormatter(document.getElementById("prof-income"));
+attachCurrencyFormatter(document.getElementById("tx-amount"));
+
+// Kompresi & Crop Kotak 1:1 Foto Profil
 function compressProfileImage(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -77,12 +90,11 @@ function compressProfileImage(file) {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        const size = 200; // Resolusi 200x200 px
+        const size = 200;
         canvas.width = size;
         canvas.height = size;
         const ctx = canvas.getContext("2d");
 
-        // Center crop agar gambar tidak gepeng
         const minSide = Math.min(img.width, img.height);
         const sx = (img.width - minSide) / 2;
         const sy = (img.height - minSide) / 2;
@@ -98,12 +110,15 @@ function compressProfileImage(file) {
   });
 }
 
-// ==================== AUTH LOGIC ====================
+// ==================== SWITCH TAB LOGIN / REGISTER ====================
+const regInputs = ["reg-name", "reg-age", "reg-phone", "reg-city", "reg-income"].map((id) => document.getElementById(id));
+
 tabLogin.onclick = () => {
   isRegisterMode = false;
   tabLogin.className = "py-2 rounded-lg text-xs font-bold bg-slate-800 text-white transition";
   tabRegister.className = "py-2 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition";
-  nameField.classList.add("hidden");
+  registerFields.classList.add("hidden");
+  regInputs.forEach((el) => (el.required = false));
   submitAuthBtn.textContent = "Masuk Sekarang";
   authErrorEl.classList.add("hidden");
 };
@@ -112,11 +127,13 @@ tabRegister.onclick = () => {
   isRegisterMode = true;
   tabRegister.className = "py-2 rounded-lg text-xs font-bold bg-slate-800 text-white transition";
   tabLogin.className = "py-2 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition";
-  nameField.classList.remove("hidden");
-  submitAuthBtn.textContent = "Buat Akun Baru";
+  registerFields.classList.remove("hidden");
+  regInputs.forEach((el) => (el.required = true));
+  submitAuthBtn.textContent = "Buat Akun & Simpan Profil";
   authErrorEl.classList.add("hidden");
 };
 
+// ==================== SYNC & LOAD PROFIL USER ====================
 async function syncUserProfile(user, extraData = {}) {
   const userRef = doc(db, "users", user.uid);
   const snap = await getDoc(userRef);
@@ -126,6 +143,11 @@ async function syncUserProfile(user, extraData = {}) {
   selectedAvatarColor = color;
 
   const displayName = extraData.name || existing.name || user.displayName || user.email.split("@")[0];
+  const age = extraData.age !== undefined ? extraData.age : (existing.age || "");
+  const gender = extraData.gender || existing.gender || "Laki-laki";
+  const phone = extraData.phone !== undefined ? extraData.phone : (existing.phone || "");
+  const city = extraData.city !== undefined ? extraData.city : (existing.city || "");
+  const monthlyIncome = extraData.monthlyIncome !== undefined ? extraData.monthlyIncome : (existing.monthlyIncome || 0);
 
   let photoURL;
   if (extraData.resetPhoto) {
@@ -142,31 +164,65 @@ async function syncUserProfile(user, extraData = {}) {
     photoURL = getDefaultAvatar(displayName, color);
   }
 
-  await setDoc(userRef, {
+  const isProfileComplete = Boolean(displayName && age && phone && city && monthlyIncome > 0);
+
+  const profilePayload = {
     name: displayName,
     email: user.email,
+    age,
+    gender,
+    phone,
+    city,
+    monthlyIncome,
     avatarColor: color,
     photoURL,
+    isProfileComplete,
     lastLogin: serverTimestamp()
-  }, { merge: true });
+  };
 
-  return { displayName, photoURL, color };
+  await setDoc(userRef, profilePayload, { merge: true });
+  userProfileData = profilePayload;
+  return profilePayload;
 }
 
+function applyProfileToDashboard(profile) {
+  document.getElementById("user-display-name").textContent = profile.name;
+  document.getElementById("user-avatar").src = profile.photoURL;
+  document.getElementById("user-city-badge").textContent = profile.city || "Lengkapi Profil";
+  document.getElementById("est-income-label").textContent = formatIDR(profile.monthlyIncome || 0);
+}
+
+// ==================== SUBMIT LOGIN / DAFTAR BARU ====================
 document.getElementById("email-auth-form").onsubmit = async (e) => {
   e.preventDefault();
   authErrorEl.classList.add("hidden");
 
   const email = document.getElementById("auth-email").value.trim();
   const password = document.getElementById("auth-password").value;
-  const name = document.getElementById("auth-name").value.trim();
 
   try {
     if (isRegisterMode) {
-      if (!name) throw new Error("Nama panggilan wajib diisi.");
+      const name = document.getElementById("reg-name").value.trim();
+      const age = Number(document.getElementById("reg-age").value);
+      const gender = document.getElementById("reg-gender").value;
+      const phone = document.getElementById("reg-phone").value.trim();
+      const city = document.getElementById("reg-city").value.trim();
+      const monthlyIncome = Number(document.getElementById("reg-income").value.replace(/\./g, ""));
+
+      if (!name || !age || !phone || !city || !monthlyIncome) {
+        throw new Error("Harap lengkapi semua data biodata & perkiraan penghasilan.");
+      }
+
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(cred.user, { displayName: name });
-      await syncUserProfile(cred.user, { name });
+      await syncUserProfile(cred.user, {
+        name,
+        age,
+        gender,
+        phone,
+        city,
+        monthlyIncome
+      });
     } else {
       await signInWithEmailAndPassword(auth, email, password);
     }
@@ -188,19 +244,23 @@ document.getElementById("google-login-btn").onclick = async () => {
 
 document.getElementById("logout-btn").onclick = () => signOut(auth);
 
+// ==================== OBSERVER STATUS LOGIN ====================
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
   if (user) {
     authScreen.classList.add("hidden");
-    profileScreen.classList.add("hidden");
-    appScreen.classList.remove("hidden");
-    appScreen.classList.add("flex");
-
     const profile = await syncUserProfile(user);
-    document.getElementById("user-display-name").textContent = profile.displayName;
-    document.getElementById("user-avatar").src = profile.photoURL;
-
+    applyProfileToDashboard(profile);
     listenTransactions(user.uid);
+
+    // Jika user baru login Google & biodata belum lengkap, arahkan ke form lengkapi profil dulu
+    if (!profile.isProfileComplete) {
+      openProfileEditor(true);
+    } else {
+      profileScreen.classList.add("hidden");
+      appScreen.classList.remove("hidden");
+      appScreen.classList.add("flex");
+    }
   } else {
     appScreen.classList.add("hidden");
     appScreen.classList.remove("flex");
@@ -215,7 +275,7 @@ onAuthStateChanged(auth, async (user) => {
 const photoInput = document.getElementById("profile-photo-input");
 const previewAvatar = document.getElementById("profile-preview-avatar");
 
-document.getElementById("open-profile-btn").onclick = () => {
+function openProfileEditor(isOnboarding = false) {
   if (!currentUser) return;
   pendingCustomPhotoBase64 = null;
   isPhotoResetRequested = false;
@@ -226,15 +286,30 @@ document.getElementById("open-profile-btn").onclick = () => {
   profileScreen.classList.remove("hidden");
   profileScreen.classList.add("flex");
 
-  const currentName = document.getElementById("user-display-name").textContent;
-  document.getElementById("profile-name-input").value = currentName;
+  document.getElementById("profile-screen-title").textContent = isOnboarding ? "Lengkapi Profil Anda" : "Edit Profil";
+  document.getElementById("profile-screen-subtitle").textContent = isOnboarding
+    ? "Isi data diri & estimasi penghasilan sebelum mulai mencatat"
+    : "Kelola biodata lengkap & estimasi penghasilan";
+  document.getElementById("close-profile-btn").style.display = isOnboarding ? "none" : "block";
+
+  document.getElementById("prof-name").value = userProfileData.name || "";
+  document.getElementById("prof-age").value = userProfileData.age || "";
+  document.getElementById("prof-gender").value = userProfileData.gender || "Laki-laki";
+  document.getElementById("prof-phone").value = userProfileData.phone || "";
+  document.getElementById("prof-city").value = userProfileData.city || "";
+  document.getElementById("prof-income").value = userProfileData.monthlyIncome
+    ? Number(userProfileData.monthlyIncome).toLocaleString("id-ID")
+    : "";
+
   document.getElementById("profile-email-display").textContent = currentUser.email;
-  previewAvatar.src = document.getElementById("user-avatar").src;
+  previewAvatar.src = userProfileData.photoURL || getDefaultAvatar(userProfileData.name);
   document.getElementById("profile-feedback").classList.add("hidden");
 
   const isGoogleUser = currentUser.providerData.some((p) => p.providerId === "google.com");
   document.getElementById("password-update-section").style.display = isGoogleUser ? "none" : "block";
-};
+}
+
+document.getElementById("open-profile-btn").onclick = () => openProfileEditor(false);
 
 document.getElementById("close-profile-btn").onclick = () => {
   profileScreen.classList.add("hidden");
@@ -243,7 +318,6 @@ document.getElementById("close-profile-btn").onclick = () => {
   appScreen.classList.add("flex");
 };
 
-// Event Saat User Memilih Foto Baru dari Galeri/Laptop
 photoInput.addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -258,30 +332,27 @@ photoInput.addEventListener("change", async (e) => {
   }
 });
 
-// Reset Foto ke Avatar Inisial
 document.getElementById("reset-photo-btn").onclick = () => {
   pendingCustomPhotoBase64 = null;
   isPhotoResetRequested = true;
   photoInput.value = "";
-  const nameVal = document.getElementById("profile-name-input").value.trim() || "User";
+  const nameVal = document.getElementById("prof-name").value.trim() || "User";
   previewAvatar.src = getDefaultAvatar(nameVal, selectedAvatarColor);
 };
 
-// Pilih Warna Badge Avatar
 document.querySelectorAll(".color-choice").forEach((btn) => {
   btn.onclick = () => {
     selectedAvatarColor = btn.dataset.color;
     document.querySelectorAll(".color-choice").forEach((b) => b.classList.replace("border-white", "border-transparent"));
     btn.classList.replace("border-transparent", "border-white");
 
-    const nameVal = document.getElementById("profile-name-input").value.trim() || "User";
+    const nameVal = document.getElementById("prof-name").value.trim() || "User";
     if (!pendingCustomPhotoBase64 && (isPhotoResetRequested || previewAvatar.src.includes("ui-avatars.com"))) {
       previewAvatar.src = getDefaultAvatar(nameVal, selectedAvatarColor);
     }
   };
 });
 
-// Simpan Perubahan Profil
 document.getElementById("profile-form").onsubmit = async (e) => {
   e.preventDefault();
   if (!currentUser) return;
@@ -290,20 +361,31 @@ document.getElementById("profile-form").onsubmit = async (e) => {
   const saveBtn = document.getElementById("save-profile-btn");
   feedbackEl.classList.add("hidden");
 
-  const newName = document.getElementById("profile-name-input").value.trim();
+  const newName = document.getElementById("prof-name").value.trim();
+  const newAge = Number(document.getElementById("prof-age").value);
+  const newGender = document.getElementById("prof-gender").value;
+  const newPhone = document.getElementById("prof-phone").value.trim();
+  const newCity = document.getElementById("prof-city").value.trim();
+  const newIncome = Number(document.getElementById("prof-income").value.replace(/\./g, ""));
   const newPass = document.getElementById("profile-new-password").value;
 
   try {
-    if (!newName) throw new Error("Nama panggilan tidak boleh kosong.");
+    if (!newName || !newAge || !newPhone || !newCity || !newIncome) {
+      throw new Error("Semua kolom biodata & perkiraan penghasilan wajib diisi.");
+    }
+
     saveBtn.disabled = true;
     saveBtn.textContent = "Menyimpan...";
 
-    // Update displayName di Firebase Auth
     await updateProfile(currentUser, { displayName: newName });
 
-    // Simpan foto Base64 & profil ke Firestore (aman dari batas ukuran URL Auth)
     const updatedProfile = await syncUserProfile(currentUser, {
       name: newName,
+      age: newAge,
+      gender: newGender,
+      phone: newPhone,
+      city: newCity,
+      monthlyIncome: newIncome,
       avatarColor: selectedAvatarColor,
       customPhoto: pendingCustomPhotoBase64,
       resetPhoto: isPhotoResetRequested
@@ -314,23 +396,32 @@ document.getElementById("profile-form").onsubmit = async (e) => {
       document.getElementById("profile-new-password").value = "";
     }
 
-    document.getElementById("user-display-name").textContent = updatedProfile.displayName;
-    document.getElementById("user-avatar").src = updatedProfile.photoURL;
+    applyProfileToDashboard(updatedProfile);
+    renderMonthlyDashboard();
     previewAvatar.src = updatedProfile.photoURL;
 
     pendingCustomPhotoBase64 = null;
     isPhotoResetRequested = false;
 
-    feedbackEl.textContent = "Profil & foto berhasil diperbarui!";
-    feedbackEl.className = "text-xs text-emerald-400";
-    feedbackEl.classList.remove("hidden");
+    // Jika sedang dalam mode onboarding (baru pertama kali login Google), langsung masuk ke Dashboard
+    if (document.getElementById("close-profile-btn").style.display === "none") {
+      document.getElementById("close-profile-btn").style.display = "block";
+      profileScreen.classList.add("hidden");
+      profileScreen.classList.remove("flex");
+      appScreen.classList.remove("hidden");
+      appScreen.classList.add("flex");
+    } else {
+      feedbackEl.textContent = "Data profil lengkap berhasil disimpan!";
+      feedbackEl.className = "text-xs text-emerald-400";
+      feedbackEl.classList.remove("hidden");
+    }
   } catch (err) {
     feedbackEl.textContent = err.message.replace("Firebase:", "").trim();
     feedbackEl.className = "text-xs text-rose-400";
     feedbackEl.classList.remove("hidden");
   } finally {
     saveBtn.disabled = false;
-    saveBtn.textContent = "Simpan Perubahan";
+    saveBtn.textContent = "Simpan Profil";
   }
 };
 
@@ -344,12 +435,6 @@ document.getElementById("close-modal-btn").onclick = () => {
   modal.classList.add("hidden");
   modal.classList.remove("flex");
 };
-
-const txAmountInput = document.getElementById("tx-amount");
-txAmountInput.addEventListener("input", (e) => {
-  const rawValue = e.target.value.replace(/\D/g, "");
-  e.target.value = rawValue ? Number(rawValue).toLocaleString("id-ID") : "";
-});
 
 const categorySelect = document.getElementById("tx-category");
 const customCategoryWrapper = document.getElementById("custom-category-wrapper");
@@ -451,6 +536,31 @@ function renderMonthlyDashboard() {
   document.getElementById("total-expense").textContent = formatIDR(expense);
   document.getElementById("total-balance").textContent = formatIDR(income - expense);
 
+  // Update Progress Bar Rasio Pengeluaran terhadap Perkiraan Penghasilan Bulanan
+  const estIncome = Number(userProfileData.monthlyIncome) || 0;
+  const ratioLabel = document.getElementById("expense-ratio-label");
+  const progressBar = document.getElementById("expense-progress-bar");
+
+  if (estIncome > 0) {
+    const pct = Math.round((expense / estIncome) * 100);
+    ratioLabel.textContent = `${pct}% dari est. penghasilan`;
+    progressBar.style.width = `${Math.min(pct, 100)}%`;
+
+    if (pct >= 90) {
+      ratioLabel.className = "font-semibold text-rose-400";
+      progressBar.className = "h-full bg-rose-500 transition-all duration-300";
+    } else if (pct >= 70) {
+      ratioLabel.className = "font-semibold text-amber-400";
+      progressBar.className = "h-full bg-amber-500 transition-all duration-300";
+    } else {
+      ratioLabel.className = "font-semibold text-emerald-400";
+      progressBar.className = "h-full bg-emerald-500 transition-all duration-300";
+    }
+  } else {
+    ratioLabel.textContent = "Belum diatur";
+    progressBar.style.width = "0%";
+  }
+
   document.querySelectorAll(".delete-btn").forEach((btn) => {
     btn.onclick = async () => {
       if (confirm("Hapus catatan transaksi ini?")) {
@@ -475,6 +585,10 @@ document.getElementById("download-report-btn").onclick = () => {
   let totalOut = 0;
 
   const rows = [
+    ["LAPORAN KEUANGAN DUITKU"],
+    ["Nama", `"${userProfileData.name || ""}"`, "Domisili", `"${userProfileData.city || ""}"`],
+    ["Periode", getMonthLabel(selectedYM), "Est. Penghasilan/Bln", userProfileData.monthlyIncome || 0],
+    [],
     ["Tanggal", "Waktu", "Keterangan", "Kategori", "Tipe", "Nominal (Rp)"]
   ];
 
@@ -494,7 +608,6 @@ document.getElementById("download-report-btn").onclick = () => {
   });
 
   rows.push([]);
-  rows.push(["REKAP BULAN", getMonthLabel(selectedYM)]);
   rows.push(["Total Pemasukan", "", "", "", "", totalIn]);
   rows.push(["Total Pengeluaran", "", "", "", "", totalOut]);
   rows.push(["Sisa Saldo Bulan Ini", "", "", "", "", totalIn - totalOut]);
